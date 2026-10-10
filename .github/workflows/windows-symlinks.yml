@@ -1,0 +1,52 @@
+name: Windows symlink check
+on:
+  push:
+    branches: [ci/windows-symlinks]
+  workflow_dispatch:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [fix/skill-local-reference-links, main]
+        symlinks: [default, 'false']
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clone
+        run: |
+          if [ "${{ matrix.symlinks }}" = default ]; then cfg=(); else cfg=(-c core.symlinks=false); fi
+          git clone -q "${cfg[@]}" --branch "${{ matrix.ref }}" https://github.com/${{ github.repository }}.git repo
+          echo "git version: $(git --version)"
+          echo "core.symlinks in clone: $(git -C repo config --get core.symlinks || echo unset)"
+          echo "system core.symlinks: $(git config --system --get core.symlinks || echo unset)"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Full checkout - what an agent reads at each checklist link
+        run: |
+          cd repo
+          ok=0; bad=0
+          for f in skills/code-review-and-quality/SKILL.md skills/shipping-and-launch/SKILL.md; do
+            for l in $(grep -oE '(\.\./)*references/[a-z-]+-(checklist|done)\.md' "$f" | sort -u); do
+              p="$(dirname "$f")/$l"
+              if [ -f "$p" ] && head -1 "$p" | grep -q '^#'; then ok=$((ok+1)); echo "OK   $p: $(head -1 "$p")"
+              else bad=$((bad+1)); echo "BAD  $p: $( [ -e "$p" ] && head -c 120 "$p" || echo missing)"; fi
+            done
+          done
+          echo "full checkout: $ok ok, $bad bad"
+      - name: Per-skill install - what an agent reads at each checklist link
+        run: |
+          mkdir inst && cd inst
+          npx -y skills@1.7.2 add ../repo --skill code-review-and-quality --skill shipping-and-launch -a claude-code -y > install.log 2>&1 || { tail -20 install.log; exit 1; }
+          ok=0; bad=0
+          for f in .claude/skills/code-review-and-quality/SKILL.md .claude/skills/shipping-and-launch/SKILL.md; do
+            for l in $(grep -oE '(\.\./)*references/[a-z-]+-(checklist|done)\.md' "$f" | sort -u); do
+              p="$(dirname "$f")/$l"
+              if [ -f "$p" ] && head -1 "$p" | grep -q '^#'; then ok=$((ok+1)); echo "OK   $p: $(head -1 "$p")"
+              else bad=$((bad+1)); echo "BAD  $p: $( [ -e "$p" ] && head -c 120 "$p" || echo missing)"; fi
+            done
+          done
+          echo "per-skill install: $ok ok, $bad bad"
