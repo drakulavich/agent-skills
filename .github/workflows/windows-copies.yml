@@ -1,0 +1,60 @@
+name: Windows copies check
+on:
+  push:
+    branches: [ci/windows-copies]
+  workflow_dispatch:
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [fix/skill-local-reference-links, main]
+        symlinks: [default, 'false']
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clone
+        run: |
+          if [ "${{ matrix.symlinks }}" = default ]; then cfg=(); else cfg=(-c core.symlinks=false); fi
+          git clone -q "${cfg[@]}" --branch "${{ matrix.ref }}" https://github.com/drakulavich/agent-skills.git repo
+          echo "git version: $(git --version)"
+          echo "core.symlinks in clone: $(git -C repo config --get core.symlinks || echo unset)"
+          echo "symlinks in checkout: $(cd repo && git ls-files -s | awk '$1==120000' | wc -l)"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Full checkout - what an agent reads at each checklist link
+        run: |
+          cd repo
+          ok=0; bad=0
+          for f in skills/*/SKILL.md skills/*/references/*.md; do
+            for l in $(grep -oE '(\.\./)*references/(shared/)?[a-z-]+-(checklist|done|patterns)\.md' "$f" | sort -u); do
+              t="${l##*/}"; [ -f "references/$t" ] || continue
+              p="$(dirname "$f")/$l"
+              if [ -f "$p" ] && head -1 "$p" | grep -q '^#'; then ok=$((ok+1))
+              else bad=$((bad+1)); echo "BAD  $p: $( [ -e "$p" ] && head -c 120 "$p" || echo missing)"; fi
+            done
+          done
+          echo "full checkout: $ok ok, $bad bad"
+      - name: Validators in the full checkout
+        continue-on-error: true
+        run: |
+          cd repo
+          node scripts/validate-reference-links.js | tail -1
+          if [ -f scripts/sync-shared-references.js ]; then node scripts/sync-shared-references.js --check | tail -1; fi
+          echo "git status after checks: $(git status --porcelain | wc -l) changed"
+      - name: Per-skill install - what an agent reads at each checklist link
+        run: |
+          mkdir inst && cd inst
+          npx -y skills@1.7.2 add ../repo --skill code-review-and-quality --skill shipping-and-launch -a claude-code -y > install.log 2>&1 || { tail -20 install.log; exit 1; }
+          ok=0; bad=0
+          for f in .claude/skills/code-review-and-quality/SKILL.md .claude/skills/shipping-and-launch/SKILL.md; do
+            for l in $(grep -oE '(\.\./)*references/(shared/)?[a-z-]+-(checklist|done)\.md' "$f" | sort -u); do
+              p="$(dirname "$f")/$l"
+              if [ -f "$p" ] && head -1 "$p" | grep -q '^#'; then ok=$((ok+1)); echo "OK   $p: $(head -1 "$p")"
+              else bad=$((bad+1)); echo "BAD  $p: $( [ -e "$p" ] && head -c 120 "$p" || echo missing)"; fi
+            done
+          done
+          echo "per-skill install: $ok ok, $bad bad"
